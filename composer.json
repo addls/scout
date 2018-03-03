@@ -1,5 +1,5 @@
 {
-    "name": "laravel/scout",
+    "name": "addls/scout",
     "description": "Laravel Scout provides a driver based solution to searching your Eloquent models.",
     "keywords": [
         "algolia",
@@ -13,8 +13,8 @@
     },
     "authors": [
         {
-            "name": "Taylor Otwell",
-            "email": "taylor@laravel.com"
+            "name": "bobo",
+            "email": "omail@163.com"
         }
     ],
     "require": {
