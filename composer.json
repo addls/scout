@@ -19,13 +19,14 @@
     ],
     "require": {
         "php": ">=7.0",
+        "doctrine/dbal": "^2.6",
+        "elasticsearch/elasticsearch": "^5.0",
         "illuminate/bus": "~5.4",
         "illuminate/contracts": "~5.4",
         "illuminate/database": "~5.4",
         "illuminate/pagination": "~5.4",
         "illuminate/queue": "~5.4",
-        "illuminate/support": "~5.4",
-        "elasticsearch/elasticsearch": "^5.0"
+        "illuminate/support": "~5.4"
     },
     "require-dev": {
         "algolia/algoliasearch-client-php": "^1.10",
