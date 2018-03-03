@@ -4,36 +4,34 @@ namespace Laravel\Scout\Engines;
 
 use Illuminate\Support\Facades\Schema;
 use Laravel\Scout\Builder;
-use Elasticsearch\Client as Elasticsearch;
+use Elasticsearch\Client as Elastic;
 use Illuminate\Database\Eloquent\Collection;
-use Illuminate\Support\Collection as BaseCollection;
 
 class ElasticsearchEngine extends Engine
 {
     /**
-     * The Elasticsearch client instance.
-     *
-     * @var \Elasticsearch\Client
-     */
-    protected $elasticsearch;
-
-    /**
-     * The index name.
+     * Index where the models will be saved.
      *
      * @var string
      */
     protected $index;
 
     /**
+     * Elastic where the instance of Elastic|\Elasticsearch\Client is stored.
+     *
+     * @var object
+     */
+    protected $elastic;
+
+    /**
      * Create a new engine instance.
      *
-     * @param  \Elasticsearch\Client  $elasticsearch
+     * @param  \Elasticsearch\Client  $elastic
      * @return void
      */
-    public function __construct(Elasticsearch $elasticsearch, $index)
+    public function __construct(Elastic $elastic, $index)
     {
-        $this->elasticsearch = $elasticsearch;
-
+        $this->elastic = $elastic;
         $this->index = $index;
     }
 
@@ -45,30 +43,24 @@ class ElasticsearchEngine extends Engine
      */
     public function update($models)
     {
-        $body = new BaseCollection();
+        $params['body'] = [];
 
-        $models->each(function ($model) use ($body) {
-            $array = $model->toSearchableArray();
-
-            if (empty($array)) {
-                return;
-            }
-
-            $body->push([
-                'index' => [
+        $models->each(function($model) use (&$params)
+        {
+            $params['body'][] = [
+                'update' => [
+                    '_id' => $model->getKey(),
                     '_index' => $this->index,
                     '_type' => $model->searchableAs(),
-                    '_id' => $model->getKey(),
-                ],
-            ]);
-
-            $body->push($array);
+                ]
+            ];
+            $params['body'][] = [
+                'doc' => $model->toSearchableArray(),
+                'doc_as_upsert' => true
+            ];
         });
 
-        $this->elasticsearch->bulk([
-            'refresh' => true,
-            'body' => $body->all(),
-        ]);
+        $this->elastic->bulk($params);
     }
 
     /**
@@ -79,55 +71,53 @@ class ElasticsearchEngine extends Engine
      */
     public function delete($models)
     {
-        $body = new BaseCollection();
+        $params['body'] = [];
 
-        $models->each(function ($model) use ($body) {
-            $body->push([
+        $models->each(function($model) use (&$params)
+        {
+            $params['body'][] = [
                 'delete' => [
+                    '_id' => $model->getKey(),
                     '_index' => $this->index,
                     '_type' => $model->searchableAs(),
-                    '_id'  => $model->getKey(),
-                ],
-            ]);
+                ]
+            ];
         });
 
-        $this->elasticsearch->bulk([
-            'refresh' => true,
-            'body' => $body->all(),
-        ]);
+        $this->elastic->bulk($params);
     }
 
     /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $query
+     * @param  Builder  $builder
      * @return mixed
      */
-    public function search(Builder $query)
+    public function search(Builder $builder)
     {
-        return $this->performSearch($query, [
-            'filters' => $this->filters($query),
-            'size' => $query->limit ?: 10000,
-        ]);
+        return $this->performSearch($builder, array_filter([
+            'numericFilters' => $this->filters($builder),
+            'size' => $builder->limit,
+        ]));
     }
 
     /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $query
+     * @param  Builder  $builder
      * @param  int  $perPage
      * @param  int  $page
      * @return mixed
      */
-    public function paginate(Builder $query, $perPage, $page)
+    public function paginate(Builder $builder, $perPage, $page)
     {
-        $result = $this->performSearch($query, [
-            'filters' => $this->filters($query),
-            'size' => $perPage,
+        $result = $this->performSearch($builder, [
+            'numericFilters' => $this->filters($builder),
             'from' => (($page * $perPage) - $perPage),
+            'size' => $perPage,
         ]);
 
-        $result['nbPages'] = (int) ceil($result['hits']['total'] / $perPage);
+        $result['nbPages'] = $result['hits']['total']/$perPage;
 
         return $result;
     }
@@ -142,6 +132,8 @@ class ElasticsearchEngine extends Engine
     protected function performSearch(Builder $builder, array $options = [])
     {
         $filters = $must = $mustNot = $ranges = $should = [];
+
+        $must[] = ['query_string' => [ 'query' => "*{$builder->query}*"]];
 
         if (array_key_exists('filters', $options) && $options['filters']) {
             foreach ($options['filters'] as $column => $value) {
@@ -266,19 +258,10 @@ class ElasticsearchEngine extends Engine
             }
         }
 
-        $sorts = [];
-
-        if (collect($builder->orders)->count() > 0) {
-            foreach ($builder->orders as $value) {
-                $sorts[] = [$value['column'] => $value['direction']];
-            }
-        }
-
-        $query = [
-            'index' =>  $this->index,
-            'type'  =>  $builder->model->searchableAs(),
+        $params = [
+            'index' => $this->index,
+            'type' => $builder->index ?: $builder->model->searchableAs(),
             'body' => [
-                'sort' => $sorts,
                 'query' => [
                     'bool' => [
                         'filter' => $filters,
@@ -286,31 +269,40 @@ class ElasticsearchEngine extends Engine
                         'must_not' => $mustNot,
                         'should' => $should
                     ]
-                ],
-            ],
+                ]
+            ]
         ];
 
         if (collect($should)->count() > 0) {
             $query['body']['query']['bool']['minimum_should_match'] = 1;
         }
 
-        if (array_key_exists('size', $options)) {
-            $query['size'] = $options['size'];
+        if ($sort = $this->sort($builder)) {
+            $params['body']['sort'] = $sort;
         }
 
-        if (array_key_exists('from', $options)) {
-            $query['from'] = $options['from'];
+        if (isset($options['from'])) {
+            $params['body']['from'] = $options['from'];
+        }
+
+        if (isset($options['size'])) {
+            $params['body']['size'] = $options['size'];
+        }
+
+        if (isset($options['numericFilters']) && count($options['numericFilters'])) {
+            $params['body']['query']['bool']['must'] = array_merge($params['body']['query']['bool']['must'], $options['numericFilters']);
         }
 
         if ($builder->callback) {
             return call_user_func(
                 $builder->callback,
-                $this->elasticsearch,
-                $query
+                $this->elastic,
+                $builder->query,
+                $params
             );
         }
 
-        return $this->elasticsearch->search($query);
+        return $this->elastic->search($params);
     }
 
     /**
@@ -334,12 +326,29 @@ class ElasticsearchEngine extends Engine
     /**
      * Get the filter array for the query.
      *
-     * @param  Builder  $query
+     * @param  Builder  $builder
      * @return array
      */
-    protected function filters(Builder $query)
+    protected function filters(Builder $builder)
     {
-        return $query->wheres;
+        return collect($builder->wheres)->map(function ($value, $key) {
+            if (is_array($value)) {
+                return ['terms' => [$key => $value]];
+            }
+
+            return ['match_phrase' => [$key => $value]];
+        })->values()->all();
+    }
+
+    /**
+     * Pluck and return the primary keys of the given results.
+     *
+     * @param  mixed  $results
+     * @return \Illuminate\Support\Collection
+     */
+    public function mapIds($results)
+    {
+        return collect($results['hits']['hits'])->pluck('_id')->values();
     }
 
     /**
@@ -351,22 +360,19 @@ class ElasticsearchEngine extends Engine
      */
     public function map($results, $model)
     {
-        if (count($results['hits']) === 0) {
+        if ($results['hits']['total'] === 0) {
             return Collection::make();
         }
 
         $keys = collect($results['hits']['hits'])
-            ->pluck('_id')
-            ->values()
-            ->all();
+            ->pluck('_id')->values()->all();
 
         $models = $model->whereIn(
-            $model->getQualifiedKeyName(), $keys
+            $model->getKeyName(), $keys
         )->get()->keyBy($model->getKeyName());
 
-        return Collection::make($results['hits']['hits'])->map(function ($hit) use ($model, $models) {
-            return isset($models[$hit['_source'][$model->getKeyName()]])
-                ? $models[$hit['_source'][$model->getKeyName()]] : null;
+        return collect($results['hits']['hits'])->map(function ($hit) use ($model, $models) {
+            return isset($models[$hit['_id']]) ? $models[$hit['_id']] : null;
         })->filter()->values();
     }
 
@@ -382,13 +388,19 @@ class ElasticsearchEngine extends Engine
     }
 
     /**
-     * Pluck and return the primary keys of the given results.
+     * Generates the sort if theres any.
      *
-     * @param  mixed $results
-     * @return \Illuminate\Support\Collection
+     * @param  Builder $builder
+     * @return array|null
      */
-    public function mapIds($results)
+    protected function sort($builder)
     {
-        return collect($results['hits'])->pluck('objectID')->values();
+        if (count($builder->orders) == 0) {
+            return null;
+        }
+
+        return collect($builder->orders)->map(function($order) {
+            return [$order['column'] => $order['direction']];
+        })->toArray();
     }
 }
